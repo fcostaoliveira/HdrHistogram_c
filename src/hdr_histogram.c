@@ -88,13 +88,11 @@ static void counts_inc_normalised(
 {
     if (HDR_LIKELY(h->normalizing_index_offset == 0))
     {
-        HDR_PREFETCH_WRITE(&h->counts[index]);
         h->counts[index] += value;
     }
     else
     {
         int32_t normalised_index = normalize_index(h, index);
-        HDR_PREFETCH_WRITE(&h->counts[normalised_index]);
         h->counts[normalised_index] += value;
     }
     h->total_count += value;
@@ -105,13 +103,11 @@ static void counts_inc_normalised_atomic(
 {
     if (HDR_LIKELY(h->normalizing_index_offset == 0))
     {
-        HDR_PREFETCH_WRITE(&h->counts[index]);
         hdr_atomic_add_fetch_64(&h->counts[index], value);
     }
     else
     {
         int32_t normalised_index = normalize_index(h, index);
-        HDR_PREFETCH_WRITE(&h->counts[normalised_index]);
         hdr_atomic_add_fetch_64(&h->counts[normalised_index], value);
     }
     hdr_atomic_add_fetch_64(&h->total_count, value);
