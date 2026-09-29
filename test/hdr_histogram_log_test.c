@@ -19,6 +19,7 @@
 #include <hdr/hdr_histogram_log.h>
 #include "hdr_encoding.h"
 #include "minunit.h"
+#include <zlib.h>
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -980,6 +981,58 @@ static char* test_zig_zag_codec(void)
     return 0;
 }
 
+static void offset_test_be32(uint8_t* dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value >> 24U);
+    dst[1] = (uint8_t)(value >> 16U);
+    dst[2] = (uint8_t)(value >> 8U);
+    dst[3] = (uint8_t)value;
+}
+
+static char* test_decoded_offset_is_bounded(void)
+{
+    struct hdr_histogram* geometry = NULL;
+    mu_assert("init", hdr_init(1, 1000000, 2, &geometry) == 0);
+    int32_t n = geometry->counts_len;
+    int32_t offsets[] = {0, 1, -1, n - 1, 1 - n, n, -n,
+        n + 1, -n - 1, INT32_MAX, INT32_MIN};
+    hdr_close(geometry);
+
+    for (int version = 1; version <= 2; version++)
+    {
+        for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++)
+        {
+            /* One count at physical index zero in a V1 or V2 payload. */
+            uint8_t raw[42] = {0};
+            uint8_t compressed[256] = {0};
+            uLongf size = sizeof(compressed) - 8;
+            struct hdr_histogram* h = NULL;
+            offset_test_be32(raw, version == 1 ? 0x1c849321U : 0x1c849313U);
+            offset_test_be32(raw + 4, version == 1 ? 2 : 1);
+            offset_test_be32(raw + 8, (uint32_t)offsets[i]);
+            offset_test_be32(raw + 12, 2);
+            offset_test_be32(raw + 20, 1);
+            offset_test_be32(raw + 28, 1000000);
+            offset_test_be32(raw + 32, 0x3ff00000U); /* double 1.0 */
+            raw[40] = version == 1 ? 0 : 2;
+            raw[41] = 1;
+            mu_assert("compress", compress(compressed + 8, &size, raw, version == 1 ? 42 : 41) == Z_OK);
+            offset_test_be32(compressed, version == 1 ? 0x1c849322U : 0x1c849314U);
+            offset_test_be32(compressed + 4, (uint32_t)size);
+            mu_assert("decode", hdr_decode_compressed(compressed, size + 8, &h) == 0);
+            mu_assert("offset not bounded", h->normalizing_index_offset == offsets[i] % n);
+            int32_t logical = offsets[i] % n;
+            if (logical < 0) logical += n;
+            int64_t value = hdr_value_at_index(h, logical);
+            mu_assert("count moved", hdr_count_at_index(h, logical) == 1);
+            mu_assert("wrong percentile", hdr_value_at_percentile(h, 100.0) ==
+                hdr_next_non_equivalent_value(h, value) - 1);
+            hdr_close(h);
+        }
+    }
+    return NULL;
+}
+
 static struct mu_result all_tests(void)
 {
     tests_run = 0;
@@ -990,6 +1043,7 @@ static struct mu_result all_tests(void)
     mu_run_test(test_encode_and_decode_compressed_large);
     mu_run_test(test_encode_and_decode_base64);
     mu_run_test(test_bounds_check_on_decode);
+    mu_run_test(test_decoded_offset_is_bounded);
 
     mu_run_test(base64_decode_block_decodes_4_chars);
     mu_run_test(base64_decode_fails_with_invalid_lengths);

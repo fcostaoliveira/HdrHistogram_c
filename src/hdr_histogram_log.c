@@ -538,6 +538,8 @@ static int hdr_decode_compressed_v1(
     apply_to_counts(h, word_size, counts_array, counts_limit);
 
     h->normalizing_index_offset = be32toh(encoding_flyweight.normalizing_index_offset);
+    /* normalize_index performs only one wrap; bound untrusted decoded offsets. */
+    h->normalizing_index_offset %= h->counts_len;
     h->conversion_ratio = int64_bits_to_double(be64toh(encoding_flyweight.conversion_ratio_bits));
     hdr_reset_internal_counters(h);
 
@@ -640,6 +642,8 @@ static int hdr_decode_compressed_v2(
     }
 
     h->normalizing_index_offset = be32toh(encoding_flyweight.normalizing_index_offset);
+    /* normalize_index performs only one wrap; bound untrusted decoded offsets. */
+    h->normalizing_index_offset %= h->counts_len;
     h->conversion_ratio = int64_bits_to_double(be64toh(encoding_flyweight.conversion_ratio_bits));
     hdr_reset_internal_counters(h);
 
