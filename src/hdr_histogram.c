@@ -734,8 +734,26 @@ static int64_t get_value_from_idx_up_to_count_scalar(
         return 0;
     }
 
-    const int32_t blk_limit = n - (n % BLK);
-    for (; idx < blk_limit; idx += BLK)
+    /* Resolve early crossings before the wider reduction. */
+    const int32_t prefix_limit = n < 16 ? n - n % 4 : 16;
+    for (; idx < prefix_limit; idx += 4)
+    {
+        uint64_t block_sum = 0;
+        for (int32_t j = 0; j < 4; j++)
+            block_sum += (uint64_t)counts[idx + j];
+        if (HDR_UNLIKELY((uint64_t)running + block_sum >= (uint64_t)count_at_percentile))
+        {
+            for (int32_t j = 0; j < 4; j++)
+            {
+                running += counts[idx + j];
+                if (running >= count_at_percentile) return hdr_value_at_index(h, idx + j);
+            }
+        }
+        else running += (int64_t)block_sum;
+    }
+
+    const int32_t blk_limit = n - BLK;
+    for (; idx <= blk_limit; idx += BLK)
     {
         uint64_t block_sum = 0;
         int32_t j;
