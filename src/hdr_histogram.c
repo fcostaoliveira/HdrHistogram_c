@@ -714,7 +714,10 @@ static int64_t get_value_from_idx_up_to_count_scalar(
     /* Sum short blocks before testing the running total. This breaks the
        loop-carried compare dependency on the common non-crossing path while
        preserving an exact per-counter walk through the crossing block. */
-    enum { BLK = 4 };
+#ifndef HDR_M6_SCAN_BLOCK
+#define HDR_M6_SCAN_BLOCK 4
+#endif
+    enum { BLK = HDR_M6_SCAN_BLOCK };
     const int64_t* counts = h->counts;
     const int32_t n = h->counts_len;
     int32_t idx = 0;
