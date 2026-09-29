@@ -535,7 +535,7 @@ bool hdr_record_values(struct hdr_histogram* h, int64_t value, int64_t count)
 {
     int32_t counts_index;
 
-    if (value < 0 || h->highest_trackable_value < value)
+    if ((uint64_t)value > (uint64_t)h->highest_trackable_value)
     {
         return false;
     }
@@ -556,7 +556,7 @@ bool hdr_record_values_atomic(struct hdr_histogram* h, int64_t value, int64_t co
 {
     int32_t counts_index;
 
-    if (value < 0 || h->highest_trackable_value < value)
+    if ((uint64_t)value > (uint64_t)h->highest_trackable_value)
     {
         return false;
     }
