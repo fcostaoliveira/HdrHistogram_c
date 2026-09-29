@@ -845,6 +845,11 @@ int hdr_value_at_percentiles(const struct hdr_histogram *h, const double *percen
         values[i] = count_at_percentile > 1 ? count_at_percentile : 1;
     }
 
+    /* The iterator never advances on an empty histogram; preserve its unresolved
+       target outputs without scanning the whole dense array. */
+    if (total_count == 0 || length == 0)
+        return 0;
+
     uint64_t total = 0;
     size_t at_pos = 0;
     if (HDR_LIKELY(h->normalizing_index_offset == 0))
