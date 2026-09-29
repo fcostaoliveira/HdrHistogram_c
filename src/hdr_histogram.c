@@ -73,6 +73,18 @@ static int32_t normalize_index(const struct hdr_histogram* h, int32_t index)
     return normalized_index + adjustment;
 }
 
+/* Keep nonzero-offset correction off the common recording path. Correctness
+   does not depend on the compiler honoring this outlining request. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static int32_t normalize_record_index(const struct hdr_histogram* h, int32_t index)
+{
+    return normalize_index(h, index);
+}
+
 static int64_t counts_get_direct(const struct hdr_histogram* h, int32_t index)
 {
     return h->counts[index];
@@ -93,7 +105,7 @@ static void counts_inc_normalised(
     }
     else
     {
-        int32_t normalised_index = normalize_index(h, index);
+        int32_t normalised_index = normalize_record_index(h, index);
         HDR_PREFETCH_WRITE(&h->counts[normalised_index]);
         h->counts[normalised_index] += value;
     }
@@ -110,7 +122,7 @@ static void counts_inc_normalised_atomic(
     }
     else
     {
-        int32_t normalised_index = normalize_index(h, index);
+        int32_t normalised_index = normalize_record_index(h, index);
         HDR_PREFETCH_WRITE(&h->counts[normalised_index]);
         hdr_atomic_add_fetch_64(&h->counts[normalised_index], value);
     }
