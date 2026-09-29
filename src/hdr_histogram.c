@@ -763,7 +763,27 @@ static int64_t get_value_from_idx_up_to_count_scalar(
         if (HDR_UNLIKELY((uint64_t)running + block_sum >=
                          (uint64_t)count_at_percentile))
         {
-            for (j = 0; j < BLK; j++)
+            /* Resolve the crossing block with short reductions too. A linear
+               BLK-counter walk otherwise restores the long dependency chain
+               for crossings near the end of an early wide block. */
+            for (j = 0; j + 4 <= BLK; j += 4)
+            {
+                uint64_t quartet = 0;
+                for (int32_t k = 0; k < 4; k++)
+                    quartet += (uint64_t)counts[idx + j + k];
+                if ((uint64_t)running + quartet < (uint64_t)count_at_percentile)
+                {
+                    running += (int64_t)quartet;
+                    continue;
+                }
+                for (int32_t k = 0; k < 4; k++)
+                {
+                    running += counts[idx + j + k];
+                    if (running >= count_at_percentile)
+                        return hdr_value_at_index(h, idx + j + k);
+                }
+            }
+            for (; j < BLK; j++)
             {
                 running += counts[idx + j];
                 if (running >= count_at_percentile)
