@@ -887,18 +887,51 @@ int hdr_value_at_percentiles(const struct hdr_histogram *h, const double *percen
         values[i] = count_at_percentile > 1 ? count_at_percentile : 1;
     }
 
-    int64_t total = 0;
+    uint64_t total = 0; /* unsigned: no signed-overflow UB when a hostile block sum is added at once */
     size_t at_pos = 0;
 
     if (HDR_LIKELY(h->normalizing_index_offset == 0))
     {
-        /* fast path: single prefix-sum scan resolves all ascending percentiles;
-           index->value only at crossings */
-        int32_t idx;
-        for (idx = 0; idx < h->counts_len && at_pos < length; idx++)
+        /* fast path: single prefix-sum scan resolves all ascending percentiles.
+           Sum a block (autovectorizes) and skip it whole while its subtotal can't
+           reach values[at_pos]; only the crossing block is walked element-wise.
+           Safe because counts are non-negative: if a block can't reach the target,
+           no element inside it can. index->value only at crossings. */
+        enum { BATCH_SCAN_BLOCK = 8 };
+        const int64_t* counts = h->counts;
+        const int32_t len = h->counts_len;
+        int32_t idx = 0;
+        for (; idx + BATCH_SCAN_BLOCK <= len && at_pos < length; idx += BATCH_SCAN_BLOCK)
         {
-            total += h->counts[idx];
-            while (at_pos < length && total >= values[at_pos])
+            /* unsigned block sum: avoid signed-overflow UB on hostile decoded counts (cf. AVX2 reducer) */
+            const uint64_t s =
+                (uint64_t)counts[idx]     + (uint64_t)counts[idx + 1] +
+                (uint64_t)counts[idx + 2] + (uint64_t)counts[idx + 3] +
+                (uint64_t)counts[idx + 4] + (uint64_t)counts[idx + 5] +
+                (uint64_t)counts[idx + 6] + (uint64_t)counts[idx + 7];
+            if (total + s >= (uint64_t)values[at_pos])
+            {
+                int32_t j;
+                for (j = idx; j < idx + BATCH_SCAN_BLOCK; j++)
+                {
+                    total += (uint64_t)counts[j];
+                    while (at_pos < length && total >= (uint64_t)values[at_pos])
+                    {
+                        values[at_pos] = highest_equivalent_value(h, hdr_value_at_index(h, j));
+                        at_pos++;
+                    }
+                }
+            }
+            else
+            {
+                total += s;
+            }
+        }
+        /* Tail: fewer than BATCH_SCAN_BLOCK counters remain. */
+        for (; idx < len && at_pos < length; idx++)
+        {
+            total += (uint64_t)counts[idx];
+            while (at_pos < length && total >= (uint64_t)values[at_pos])
             {
                 values[at_pos] = highest_equivalent_value(h, hdr_value_at_index(h, idx));
                 at_pos++;
@@ -912,8 +945,8 @@ int hdr_value_at_percentiles(const struct hdr_histogram *h, const double *percen
         hdr_iter_init(&iter, h);
         while (hdr_iter_next(&iter) && at_pos < length)
         {
-            total += iter.count;
-            while (at_pos < length && total >= values[at_pos])
+            total += (uint64_t)iter.count;
+            while (at_pos < length && total >= (uint64_t)values[at_pos])
             {
                 values[at_pos] = highest_equivalent_value(h, iter.value);
                 at_pos++;
