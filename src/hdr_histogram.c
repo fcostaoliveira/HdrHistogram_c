@@ -735,7 +735,7 @@ static int64_t get_value_from_idx_up_to_count_scalar(
     }
 
     /* Resolve early crossings before the wider reduction. */
-    const int32_t prefix_limit = n < 16 ? n - n % 4 : 16;
+    const int32_t prefix_limit = (n < 16 ? n : 16) & ~3;
     for (; idx < prefix_limit; idx += 4)
     {
         uint64_t block_sum = 0;
