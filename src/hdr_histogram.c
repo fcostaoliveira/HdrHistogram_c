@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include <errno.h>
 #include <inttypes.h>
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #include <hdr/hdr_histogram.h>
 #include "hdr_tests.h"
@@ -732,6 +735,43 @@ static int64_t get_value_from_idx_up_to_count_scalar(
     }
 
     const int32_t blk_limit = n - (n % BLK);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    /* Keep early crossings on the existing four-counter path. */
+    const int32_t prefix_limit = blk_limit < 16 ? blk_limit : 16;
+    for (; idx < prefix_limit; idx += BLK)
+    {
+        uint64_t block = 0;
+        for (int32_t j = 0; j < BLK; j++) block += (uint64_t)counts[idx + j];
+        if (HDR_UNLIKELY((uint64_t)running + block >= (uint64_t)count_at_percentile))
+        {
+            for (int32_t j = 0; j < BLK; j++)
+            {
+                running += counts[idx + j];
+                if (running >= count_at_percentile) return hdr_value_at_index(h, idx + j);
+            }
+        }
+        else running += (int64_t)block;
+    }
+    const int32_t vector_limit = n - n % 16;
+    for (; idx < vector_limit; idx += 16)
+    {
+        const uint64_t* p = (const uint64_t*)(counts + idx);
+        uint64x2_t a = vaddq_u64(vld1q_u64(p), vld1q_u64(p + 2));
+        uint64x2_t b = vaddq_u64(vld1q_u64(p + 4), vld1q_u64(p + 6));
+        uint64x2_t c = vaddq_u64(vld1q_u64(p + 8), vld1q_u64(p + 10));
+        uint64x2_t d = vaddq_u64(vld1q_u64(p + 12), vld1q_u64(p + 14));
+        uint64_t block = vaddvq_u64(vaddq_u64(vaddq_u64(a, b), vaddq_u64(c, d)));
+        if (HDR_UNLIKELY((uint64_t)running + block >= (uint64_t)count_at_percentile))
+        {
+            for (int32_t j = 0; j < 16; j++)
+            {
+                running += counts[idx + j];
+                if (running >= count_at_percentile) return hdr_value_at_index(h, idx + j);
+            }
+        }
+        else running += (int64_t)block;
+    }
+#endif
     for (; idx < blk_limit; idx += BLK)
     {
         uint64_t block_sum = 0;
