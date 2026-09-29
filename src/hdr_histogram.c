@@ -845,16 +845,56 @@ int hdr_value_at_percentiles(const struct hdr_histogram *h, const double *percen
         values[i] = count_at_percentile > 1 ? count_at_percentile : 1;
     }
 
-    hdr_iter_init(&iter, h);
-    int64_t total = 0;
+    uint64_t total = 0;
     size_t at_pos = 0;
-    while (hdr_iter_next(&iter) && at_pos < length)
+    if (HDR_LIKELY(h->normalizing_index_offset == 0))
     {
-        total += iter.count;
-        while (at_pos < length && total >= values[at_pos])
+        enum { BLK = 8 };
+        const int64_t* counts = h->counts;
+        const int32_t n = h->counts_len;
+        const int32_t limit = n - n % BLK;
+        int32_t idx = 0;
+        for (; idx < limit && at_pos < length; idx += BLK)
         {
-            values[at_pos] = highest_equivalent_value(h, iter.value);
-            at_pos++;
+            uint64_t block = 0;
+            for (int32_t j = 0; j < BLK; j++)
+                block += (uint64_t)counts[idx + j];
+            if (total + block < (uint64_t)values[at_pos])
+            {
+                total += block;
+                continue;
+            }
+            for (int32_t j = 0; j < BLK; j++)
+            {
+                total += (uint64_t)counts[idx + j];
+                while (at_pos < length && total >= (uint64_t)values[at_pos])
+                {
+                    values[at_pos] = highest_equivalent_value(h, hdr_value_at_index(h, idx + j));
+                    at_pos++;
+                }
+            }
+        }
+        for (; idx < n && at_pos < length; idx++)
+        {
+            total += (uint64_t)counts[idx];
+            while (at_pos < length && total >= (uint64_t)values[at_pos])
+            {
+                values[at_pos] = highest_equivalent_value(h, hdr_value_at_index(h, idx));
+                at_pos++;
+            }
+        }
+    }
+    else
+    {
+        hdr_iter_init(&iter, h);
+        while (hdr_iter_next(&iter) && at_pos < length)
+        {
+            total += (uint64_t)iter.count;
+            while (at_pos < length && total >= (uint64_t)values[at_pos])
+            {
+                values[at_pos] = highest_equivalent_value(h, iter.value);
+                at_pos++;
+            }
         }
     }
     return 0;
