@@ -234,6 +234,33 @@ static char* test_timespec_from_double(void)
     return 0;
 }
 
+static char* test_timespec_from_double_checked(void)
+{
+    hdr_timespec t;
+
+    /* success returns 0 and matches the void variant */
+    mu_assert("valid returns 0", hdr_timespec_from_double_checked(&t, 1403476110.183) == 0);
+    mu_assert("valid seconds", compare_int64(INT64_C(1403476110), (int64_t) t.tv_sec));
+    mu_assert("valid nanoseconds", compare_int64(INT64_C(183000000), (int64_t) t.tv_nsec));
+
+    /* failures return an error and leave *t unchanged */
+    t.tv_sec = 7; t.tv_nsec = 9;
+    mu_assert("nan is EINVAL", hdr_timespec_from_double_checked(&t, NAN) == -EINVAL);
+    mu_assert("nan leaves t", t.tv_sec == 7 && t.tv_nsec == 9);
+    mu_assert("inf is EINVAL", hdr_timespec_from_double_checked(&t, INFINITY) == -EINVAL);
+    mu_assert("inf leaves t", t.tv_sec == 7 && t.tv_nsec == 9);
+    mu_assert("huge is ERANGE", hdr_timespec_from_double_checked(&t, 1e300) == -ERANGE);
+    mu_assert("huge leaves t", t.tv_sec == 7 && t.tv_nsec == 9);
+    mu_assert("huge negative is ERANGE", hdr_timespec_from_double_checked(&t, -1e300) == -ERANGE);
+    mu_assert("huge negative leaves t", t.tv_sec == 7 && t.tv_nsec == 9);
+
+    /* the void form still zeroes on failure */
+    hdr_timespec_from_double(&t, NAN);
+    mu_assert("void form zeroes", t.tv_sec == 0 && t.tv_nsec == 0);
+
+    return 0;
+}
+
 static char* test_reset_internal_counters_honours_offset(void)
 {
     /* Regression: hdr_reset_internal_counters read counts[] by raw storage index but
@@ -405,6 +432,101 @@ static char* test_percentiles_by_value_at_percentiles(void)
     mu_assert("Value at 99.99% not 1000.0", compare_percentile(values[2], 1000.0, 0.001));
     mu_assert("Value at 99.999% not 100000000.0", compare_percentile(values[3], 100000000.0, 0.001));
     mu_assert("Value at 100% not 100000000.0", compare_percentile(values[4], 100000000.0, 0.001));
+    return 0;
+}
+
+/* A decoded/foreign histogram can carry normalizing_index_offset != 0, so counts[] is
+   rotated in storage. hdr_value_at_percentiles must honor the offset (via the iterator
+   fallback) rather than read counts[] directly — otherwise it returns wrong percentiles.
+   Build a rotated copy representing the same data and assert identical percentiles. */
+static char* test_value_at_percentiles_with_offset(void)
+{
+    load_histograms();
+
+    struct hdr_histogram* rotated;
+    mu_assert("init rotated",
+        hdr_init(1, INT64_C(3600) * 1000 * 1000, 3, &rotated) == 0);
+
+    const int32_t k = 37; /* arbitrary non-zero offset */
+    const int32_t len = raw_histogram->counts_len;
+    rotated->normalizing_index_offset = k;
+    rotated->total_count = raw_histogram->total_count;
+    for (int32_t j = 0; j < len; j++)
+    {
+        rotated->counts[j] = raw_histogram->counts[((int64_t)j + k) % len];
+    }
+
+    double percentiles[5] = { 30.0, 99.0, 99.99, 99.999, 100.0 };
+    int64_t unrotated[5] = { 0 };
+    int64_t offsetted[5] = { 0 };
+    mu_assert("unrotated value_at_percentiles return 0",
+        hdr_value_at_percentiles(raw_histogram, percentiles, unrotated, 5) == 0);
+    mu_assert("offset value_at_percentiles return 0",
+        hdr_value_at_percentiles(rotated, percentiles, offsetted, 5) == 0);
+    mu_assert("offset histogram percentiles differ from unrotated",
+        offsetted[0] == unrotated[0] && offsetted[1] == unrotated[1] &&
+        offsetted[2] == unrotated[2] && offsetted[3] == unrotated[3] &&
+        offsetted[4] == unrotated[4]);
+
+    hdr_close(rotated);
+    return 0;
+}
+
+/* Exhaustive parity check for the blocked skip-scan in hdr_value_at_percentiles:
+   a dense histogram (many populated buckets, so block boundaries and crossing
+   blocks are exercised, not just all-zero skips) resolved via the fast blocked
+   path (offset 0) must return byte-identical values to the offset-aware iterator
+   fallback for a fine sweep of percentiles. */
+static char* test_value_at_percentiles_blocked_parity(void)
+{
+    struct hdr_histogram *dense, *rotated;
+    hdr_init(1, INT64_C(3600) * 1000 * 1000, 3, &dense);
+    hdr_init(1, INT64_C(3600) * 1000 * 1000, 3, &rotated);
+
+    /* Spread records densely across the range so counts[] has clusters and gaps. */
+    int64_t v;
+    for (v = 1; v <= 2000000; v += 7)
+    {
+        hdr_record_value(dense, v);
+    }
+    hdr_record_value(dense, INT64_C(3000) * 1000 * 1000); /* a far outlier */
+
+    const int32_t k = 101;
+    const int32_t len = dense->counts_len;
+    rotated->normalizing_index_offset = k;
+    rotated->total_count = dense->total_count;
+    int32_t j;
+    for (j = 0; j < len; j++)
+    {
+        rotated->counts[j] = dense->counts[((int64_t)j + k) % len];
+    }
+
+    /* Fine sweep including edges and values likely to land on block boundaries. */
+    double pcts[64];
+    int n = 0;
+    pcts[n++] = 0.0;
+    double p;
+    for (p = 0.5; p < 100.0 && n < 62; p += 1.7)
+    {
+        pcts[n++] = p;
+    }
+    pcts[n++] = 99.999;
+    pcts[n++] = 100.0;
+
+    int64_t blocked[64] = { 0 };
+    int64_t reference[64] = { 0 };
+    mu_assert("blocked value_at_percentiles return 0",
+        hdr_value_at_percentiles(dense, pcts, blocked, (size_t)n) == 0);
+    mu_assert("iterator value_at_percentiles return 0",
+        hdr_value_at_percentiles(rotated, pcts, reference, (size_t)n) == 0);
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        mu_assert("blocked scan differs from iterator reference", blocked[i] == reference[i]);
+    }
+
+    hdr_close(dense);
+    hdr_close(rotated);
     return 0;
 }
 
@@ -1130,33 +1252,56 @@ static char* test_count_at_index_out_of_range(void)
     return 0;
 }
 
-static char* test_percentile_signed_counts(void)
+static char* test_percentile_widened_scan(void)
 {
+    /* Exercise the widened (16-wide) percentile scan across many blocks plus a
+       non-multiple-of-16 tail. counts[] are non-negative (no subtract API), so the
+       scan assumes a monotonic prefix; results must match the per-bucket reference. */
     struct hdr_histogram* h = NULL;
-    const double percentile = 50.0;
-    int64_t value = 0;
+    int64_t v, p50, p90, p99;
+    mu_assert("allocate", hdr_init(1, 1000000, 3, &h) == 0);
+    for (v = 1; v <= 100000; v++)
+    {
+        mu_assert("record", hdr_record_value(h, v));
+    }
+
+    p50 = hdr_value_at_percentile(h, 50.0);
+    p90 = hdr_value_at_percentile(h, 90.0);
+    p99 = hdr_value_at_percentile(h, 99.0);
+
+    mu_assert("percentiles monotonic p50<=p90", p50 <= p90);
+    mu_assert("percentiles monotonic p90<=p99", p90 <= p99);
+    /* uniform 1..100000: median ~50000, within one bucket's quantization */
+    mu_assert("p50 near true median", p50 >= 49900 && p50 <= 50100);
+    mu_assert("p90 near true 90th", p90 >= 89900 && p90 <= 90100);
+    mu_assert("p0 is the minimum", hdr_value_at_percentile(h, 0.0) <= hdr_min(h));
+    mu_assert("p100 is the maximum", hdr_value_at_percentile(h, 100.0) == hdr_max(h));
+
+    hdr_close(h);
+    return 0;
+}
+
+static char* test_record_rejects_negative_count(void)
+{
+    /* Non-negative counts are the contract the percentile scan relies on; the
+       record path must reject a negative count rather than corrupt the prefix sum. */
+    struct hdr_histogram* h = NULL;
     mu_assert("allocate", hdr_init(1, 1000, 3, &h) == 0);
-    mu_assert("positive count", hdr_record_values(h, 16, 2));
-    mu_assert("negative count", hdr_record_values(h, 20, -2));
-    mu_assert("positive tail", hdr_record_values(h, 48, 2));
-    value = hdr_value_at_percentile(h, percentile);
-    mu_assert("retain first prefix crossing", value == 16);
-    hdr_reset(h);
-    mu_assert("negative prefix", hdr_record_values(h, 16, -2));
-    mu_assert("recover prefix", hdr_record_values(h, 20, 4));
-    mu_assert("positive tail", hdr_record_values(h, 48, 2));
-    value = hdr_value_at_percentile(h, percentile);
-    mu_assert("negative prefix is below target", value == 20);
+    mu_assert("positive count accepted", hdr_record_values(h, 100, 5));
+    mu_assert("negative count rejected", !hdr_record_values(h, 100, -1));
+    mu_assert("negative count leaves total unchanged", h->total_count == 5);
     hdr_close(h);
     return 0;
 }
 
 static struct mu_result all_tests(void)
 {
-    mu_run_test(test_percentile_signed_counts);
+    mu_run_test(test_percentile_widened_scan);
+    mu_run_test(test_record_rejects_negative_count);
     mu_run_test(test_create);
     mu_run_test(test_invalid_init);
     mu_run_test(test_timespec_from_double);
+    mu_run_test(test_timespec_from_double_checked);
     mu_run_test(test_reset_internal_counters_honours_offset);
     mu_run_test(test_bucket_config_shift_overflow);
     mu_run_test(test_bucket_config_reject_defines_cfg);
@@ -1171,6 +1316,8 @@ static struct mu_result all_tests(void)
     mu_run_test(test_percentiles);
     mu_run_test(test_percentile_scan_matches_naive_reference);
     mu_run_test(test_percentiles_by_value_at_percentiles);
+    mu_run_test(test_value_at_percentiles_with_offset);
+    mu_run_test(test_value_at_percentiles_blocked_parity);
     mu_run_test(test_percentile_singular_equals_plural_with_offset);
     mu_run_test(test_recorded_values);
     mu_run_test(test_linear_values);
