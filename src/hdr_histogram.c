@@ -914,14 +914,15 @@ static int64_t get_value_from_idx_up_to_count(const struct hdr_histogram* h, int
 }
 
 
-/* Target cumulative count in [1, total_count]; NaN/+inf -> total_count, -inf/negative -> 1 */
+/* Target cumulative count in [1, total_count]; NaN/+inf/p100 -> total_count (exact above 2^53), -inf/negative -> 1 */
 static int64_t count_at_percentile(int64_t total_count, double percentile)
 {
-    const double requested = percentile < 100.0 ? percentile : 100.0;
-    const double cc = ((requested / 100) * (double) total_count) + 0.5;
+    if (!(percentile < 100.0))          return total_count;
+    const double cc = ((percentile / 100) * (double) total_count) + 0.5;
     if (!(cc >= 1.0))                   return 1;
-    if (cc >= (double) total_count)     return total_count;
-    return (int64_t) cc;
+    if (cc >= 9223372036854775808.0)    return total_count;
+    const int64_t target = (int64_t) cc;
+    return target < total_count ? target : total_count;
 }
 
 int64_t hdr_value_at_percentile(const struct hdr_histogram* h, double percentile)
